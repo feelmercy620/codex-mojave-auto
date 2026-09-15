@@ -129,7 +129,8 @@ jobs:
           rustup default stable
 
       - name: Test automation helpers
-        run: python3 -m unittest discover -s automation/tests -p 'test_*.py'
+        working-directory: automation
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Inject Mojave compatibility
         run: |
