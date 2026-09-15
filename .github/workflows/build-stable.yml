@@ -1,0 +1,282 @@
+name: Build stable Codex for macOS Mojave
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable Codex version to build, for example 0.154.0; blank selects latest"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-mojave-stable-release
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Find unbuilt stable release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.release.outputs.should_build }}
+      version: ${{ steps.release.outputs.version }}
+      upstream_tag: ${{ steps.release.outputs.upstream_tag }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      upstream_url: ${{ steps.release.outputs.upstream_url }}
+    steps:
+      - name: Checkout automation
+        uses: actions/checkout@v6
+
+      - name: Select stable upstream release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          if [[ -n "${REQUESTED_VERSION:-}" ]]; then
+            if [[ ! "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Only stable x.y.z versions are accepted: $REQUESTED_VERSION" >&2
+              exit 1
+            fi
+            endpoint="repos/openai/codex/releases/tags/rust-v${REQUESTED_VERSION}"
+            args+=(--requested-version "$REQUESTED_VERSION")
+          else
+            endpoint="repos/openai/codex/releases/latest"
+          fi
+
+          gh api "$endpoint" > "$RUNNER_TEMP/upstream-release.json"
+          metadata="$(python3 scripts/select_release.py \
+            "$RUNNER_TEMP/upstream-release.json" "${args[@]}")"
+
+          version="$(jq -r '.version' <<<"$metadata")"
+          upstream_tag="$(jq -r '.upstream_tag' <<<"$metadata")"
+          release_tag="$(jq -r '.release_tag' <<<"$metadata")"
+          upstream_url="$(jq -r '.upstream_url' <<<"$metadata")"
+
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
+            >/dev/null 2>&1; then
+            should_build=false
+            echo "Release $release_tag already exists; nothing to build."
+          else
+            should_build=true
+            echo "Selected stable Codex $version ($upstream_tag)."
+          fi
+
+          {
+            echo "should_build=$should_build"
+            echo "version=$version"
+            echo "upstream_tag=$upstream_tag"
+            echo "release_tag=$release_tag"
+            echo "upstream_url=$upstream_url"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and publish Mojave package
+    needs: discover
+    if: needs.discover.outputs.should_build == 'true'
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      CODEX_VERSION: ${{ needs.discover.outputs.version }}
+      UPSTREAM_TAG: ${{ needs.discover.outputs.upstream_tag }}
+      RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
+      UPSTREAM_URL: ${{ needs.discover.outputs.upstream_url }}
+      PACKAGE_NAME: codex-mojave-${{ needs.discover.outputs.version }}-x86_64-apple-darwin.tar.gz
+    steps:
+      - name: Checkout automation
+        uses: actions/checkout@v6
+        with:
+          path: automation
+
+      - name: Checkout stable Codex source
+        uses: actions/checkout@v6
+        with:
+          repository: openai/codex
+          ref: ${{ env.UPSTREAM_TAG }}
+          path: codex
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-version: "1.28.1"
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --target x86_64-apple-darwin
+          rustup default stable
+
+      - name: Test automation helpers
+        run: python3 -m unittest discover -s automation/tests -p 'test_*.py'
+
+      - name: Inject Mojave compatibility
+        run: |
+          python3 automation/scripts/prepare_mojave.py codex \
+            --expected-version "$CODEX_VERSION"
+
+      - name: Test upstream V8 build helper
+        working-directory: codex
+        run: |
+          python3 -m unittest discover \
+            -s .github/scripts \
+            -p 'test_rusty_v8_bazel.py'
+
+      - name: Build Mojave-compatible V8
+        working-directory: codex
+        run: |
+          python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
+            --platform macos_amd64 \
+            --target x86_64-apple-darwin \
+            --compilation-mode opt \
+            --output-dir dist/x86_64-apple-darwin \
+            --bazel-config macos-x86_64-10-14 \
+            --bazel-config v8-target-x64 \
+            --bazel-config v8-release-compat
+
+      - name: Locate and verify V8 artifacts
+        id: v8
+        working-directory: codex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$(find dist/x86_64-apple-darwin \
+            -maxdepth 1 -name 'librusty_v8_release_*.a.gz' -print -quit)"
+          binding="$(find dist/x86_64-apple-darwin \
+            -maxdepth 1 -name 'src_binding_release_*.rs' -print -quit)"
+
+          if [[ -z "$archive" || -z "$binding" ]]; then
+            echo "V8 archive or binding was not generated." >&2
+            exit 1
+          fi
+
+          gzip -dc "$archive" > "$RUNNER_TEMP/librusty_v8_mojave.a"
+          nm -u "$RUNNER_TEMP/librusty_v8_mojave.a" \
+            > "$RUNNER_TEMP/v8-symbols.txt"
+          if grep -q '_aligned_alloc' "$RUNNER_TEMP/v8-symbols.txt"; then
+            echo "V8 still references aligned_alloc and cannot run on Mojave." >&2
+            exit 1
+          fi
+
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "binding=$binding" >> "$GITHUB_OUTPUT"
+          echo "V8 archive passed the Mojave symbol check."
+
+      - name: Install just
+        run: command -v just >/dev/null 2>&1 || brew install just
+
+      - name: Run V8 smoke tests
+        working-directory: codex/codex-rs
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.14"
+          RUSTY_V8_ARCHIVE: ${{ github.workspace }}/codex/${{ steps.v8.outputs.archive }}
+          RUSTY_V8_SRC_BINDING_PATH: ${{ github.workspace }}/codex/${{ steps.v8.outputs.binding }}
+        run: just test -p codex-v8-poc
+
+      - name: Free Bazel build space
+        working-directory: codex
+        run: bazel clean --expunge
+
+      - name: Build complete Codex package
+        working-directory: codex
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/codex-target
+          MACOSX_DEPLOYMENT_TARGET: "10.14"
+          RUSTY_V8_ARCHIVE: ${{ github.workspace }}/codex/${{ steps.v8.outputs.archive }}
+          RUSTY_V8_SRC_BINDING_PATH: ${{ github.workspace }}/codex/${{ steps.v8.outputs.binding }}
+        run: |
+          python3 scripts/build_codex_package.py \
+            --target x86_64-apple-darwin \
+            --cargo-profile release \
+            --package-dir dist/codex-mojave \
+            --archive-output "dist/$PACKAGE_NAME" \
+            --force
+
+      - name: Verify final executables
+        working-directory: codex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for binary in \
+            dist/codex-mojave/bin/codex \
+            dist/codex-mojave/bin/codex-code-mode-host
+          do
+            file "$binary" | grep -q 'x86_64'
+
+            load_commands="$(otool -l "$binary")"
+            if ! grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
+              <<<"$load_commands" | grep -Eq '(minos|version) 10\.14'; then
+              echo "$binary does not declare macOS 10.14 as its minimum OS." >&2
+              exit 1
+            fi
+
+            nm -u "$binary" > "$RUNNER_TEMP/final-symbols.txt"
+            if grep -q '_aligned_alloc' "$RUNNER_TEMP/final-symbols.txt"; then
+              echo "$binary still references aligned_alloc." >&2
+              exit 1
+            fi
+          done
+
+          shasum -a 256 "dist/$PACKAGE_NAME" \
+            > "dist/$PACKAGE_NAME.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-mojave-${{ env.CODEX_VERSION }}
+          path: |
+            codex/dist/${{ env.PACKAGE_NAME }}
+            codex/dist/${{ env.PACKAGE_NAME }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Unofficial Mojave-compatible build of Codex CLI ${CODEX_VERSION}.
+
+          - Upstream release: ${UPSTREAM_URL}
+          - Architecture: x86_64
+          - Minimum macOS version: 10.14
+          - V8 was rebuilt with the Mojave deployment target and verified not to reference \`_aligned_alloc\`.
+
+          This package is maintained independently and is not an official OpenAI binary.
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            "codex/dist/$PACKAGE_NAME" \
+            "codex/dist/$PACKAGE_NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Codex CLI ${CODEX_VERSION} for macOS Mojave" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --target "$GITHUB_SHA"
+
+      - name: Write summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Codex Mojave build"
+            echo
+            echo "- Upstream: $UPSTREAM_TAG"
+            echo "- Version: $CODEX_VERSION"
+            echo "- Release tag: $RELEASE_TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
