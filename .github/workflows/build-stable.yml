@@ -1,6 +1,13 @@
 name: Build stable Codex for macOS Mojave
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-stable.yml"
+      - "scripts/**"
+      - "tests/**"
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
