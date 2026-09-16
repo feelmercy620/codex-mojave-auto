@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/build-stable.yml"
       - "scripts/**"
+      - "patches/**"
       - "tests/**"
   schedule:
     - cron: "23 */6 * * *"
@@ -174,9 +175,11 @@ jobs:
           fi
 
           gzip -dc "$archive" > "$RUNNER_TEMP/librusty_v8_mojave.a"
-          nm -u "$RUNNER_TEMP/librusty_v8_mojave.a" \
+          # Include archive member names so a failed check identifies the caller.
+          nm -u -o "$RUNNER_TEMP/librusty_v8_mojave.a" \
             > "$RUNNER_TEMP/v8-symbols.txt"
-          if grep -q '_aligned_alloc' "$RUNNER_TEMP/v8-symbols.txt"; then
+          # Match the exact system symbol, not similarly named C++ helpers.
+          if grep -E '[[:space:]]_aligned_alloc$' "$RUNNER_TEMP/v8-symbols.txt"; then
             echo "V8 still references aligned_alloc and cannot run on Mojave." >&2
             exit 1
           fi
@@ -184,6 +187,14 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "binding=$binding" >> "$GITHUB_OUTPUT"
           echo "V8 archive passed the Mojave symbol check."
+
+      - name: Upload V8 symbol diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v8-symbol-diagnostics
+          path: ${{ runner.temp }}/v8-symbols.txt
+          if-no-files-found: ignore
 
       - name: Install just
         run: command -v just >/dev/null 2>&1 || brew install just
@@ -234,8 +245,8 @@ jobs:
               exit 1
             fi
 
-            nm -u "$binary" > "$RUNNER_TEMP/final-symbols.txt"
-            if grep -q '_aligned_alloc' "$RUNNER_TEMP/final-symbols.txt"; then
+            nm -u -o "$binary" > "$RUNNER_TEMP/final-symbols.txt"
+            if grep -E '[[:space:]]_aligned_alloc$' "$RUNNER_TEMP/final-symbols.txt"; then
               echo "$binary still references aligned_alloc." >&2
               exit 1
             fi
