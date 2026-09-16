@@ -129,6 +129,11 @@ jobs:
             --target x86_64-apple-darwin
           rustup default stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Test automation helpers
         working-directory: automation
         run: python3 -m unittest discover -s tests -p 'test_*.py'

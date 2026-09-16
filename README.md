@@ -16,6 +16,9 @@ release has not been built before, the workflow:
 5. runs the V8 smoke tests and builds the complete Codex package;
 6. verifies the final x86_64 executables and publishes a GitHub Release.
 
+The macOS workflow installs `cargo-nextest` before running these tests because
+the upstream `just test` recipe invokes `cargo nextest run`.
+
 ## Run a build manually
 
 Open **Actions → Build stable Codex for macOS Mojave → Run workflow**. Leave the
