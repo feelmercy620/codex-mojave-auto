@@ -219,6 +219,7 @@ jobs:
       - name: Build complete Codex package
         working-directory: codex
         env:
+          CODEX_REPO_ROOT: ${{ github.workspace }}/codex
           CARGO_TARGET_DIR: ${{ runner.temp }}/codex-target
           MACOSX_DEPLOYMENT_TARGET: "10.14"
           RUSTY_V8_ARCHIVE: ${{ github.workspace }}/codex/${{ steps.v8.outputs.archive }}
