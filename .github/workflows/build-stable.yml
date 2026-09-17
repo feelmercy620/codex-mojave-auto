@@ -150,7 +150,15 @@ jobs:
             -s .github/scripts \
             -p 'test_rusty_v8_bazel.py'
 
+      - name: Restore cached Mojave V8 artifacts
+        id: v8-cache
+        uses: actions/cache@v4
+        with:
+          path: codex/dist/x86_64-apple-darwin
+          key: rusty-v8-mojave-${{ env.UPSTREAM_TAG }}-${{ hashFiles('automation/patches/**', 'automation/scripts/prepare_mojave.py', '.github/workflows/build-stable.yml') }}
+
       - name: Build Mojave-compatible V8
+        if: steps.v8-cache.outputs.cache-hit != 'true'
         working-directory: codex
         run: |
           python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
