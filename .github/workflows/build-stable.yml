@@ -17,6 +17,11 @@ on:
         description: "Stable Codex version to build, for example 0.154.0; blank selects latest"
         required: false
         type: string
+      rebuild_existing:
+        description: "Rebuild and replace assets for an existing Mojave release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -45,6 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          REBUILD_EXISTING: ${{ inputs.rebuild_existing }}
         run: |
           set -euo pipefail
 
@@ -70,12 +76,12 @@ jobs:
           upstream_url="$(jq -r '.upstream_url' <<<"$metadata")"
 
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
-            >/dev/null 2>&1; then
+            >/dev/null 2>&1 && [[ "${REBUILD_EXISTING:-false}" != "true" ]]; then
             should_build=false
             echo "Release $release_tag already exists; nothing to build."
           else
             should_build=true
-            echo "Selected stable Codex $version ($upstream_tag)."
+            echo "Selected stable Codex $version ($upstream_tag); existing assets will be replaced if present."
           fi
 
           {
@@ -264,6 +270,11 @@ jobs:
               echo "$binary still references aligned_alloc." >&2
               exit 1
             fi
+            if grep -E '[[:space:]]_kSecUse(DataProtectionKeychain|AuthenticationContext)$' \
+              "$RUNNER_TEMP/final-symbols.txt"; then
+              echo "$binary references macOS 10.15+ Security.framework symbols." >&2
+              exit 1
+            fi
           done
 
           shasum -a 256 "dist/$PACKAGE_NAME" \
@@ -290,17 +301,30 @@ jobs:
           - Architecture: x86_64
           - Minimum macOS version: 10.14
           - V8 was rebuilt with the Mojave deployment target and verified not to reference \`_aligned_alloc\`.
+          - The macOS 10.15+ Touch ID provider is disabled because Mojave lacks its Security.framework symbols.
 
           This package is maintained independently and is not an official OpenAI binary.
           EOF
 
-          gh release create "$RELEASE_TAG" \
-            "codex/dist/$PACKAGE_NAME" \
-            "codex/dist/$PACKAGE_NAME.sha256" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Codex CLI ${CODEX_VERSION} for macOS Mojave" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" \
-            --target "$GITHUB_SHA"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Codex CLI ${CODEX_VERSION} for macOS Mojave" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh release upload "$RELEASE_TAG" \
+              "codex/dist/$PACKAGE_NAME" \
+              "codex/dist/$PACKAGE_NAME.sha256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "codex/dist/$PACKAGE_NAME" \
+              "codex/dist/$PACKAGE_NAME.sha256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Codex CLI ${CODEX_VERSION} for macOS Mojave" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --target "$GITHUB_SHA"
+          fi
 
       - name: Write summary
         if: always()

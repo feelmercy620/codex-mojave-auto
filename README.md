@@ -13,8 +13,11 @@ release has not been built before, the workflow:
    libc++ allocation helper to use `posix_memalign` before macOS 10.15;
 3. rebuilds the matching V8 and `rusty_v8` artifacts;
 4. rejects artifacts that reference `_aligned_alloc`;
-5. runs the V8 smoke tests and builds the complete Codex package;
-6. verifies the final x86_64 executables and publishes a GitHub Release.
+5. disables the macOS 10.15+ Touch ID provider and uses Codex's unsupported
+   user-verification backend on Mojave;
+6. runs the V8 smoke tests and builds the complete Codex package;
+7. verifies the final x86_64 executables, including their Security.framework
+   symbols, and publishes a GitHub Release.
 
 The macOS workflow installs `cargo-nextest` before running these tests because
 the upstream `just test` recipe invokes `cargo nextest run`.
@@ -28,6 +31,11 @@ such as `0.154.0`.
 If the corresponding `mojave-vX.Y.Z` release already exists, the workflow exits
 successfully without rebuilding it. A failed build does not create a release,
 so it can be rerun after the compatibility logic is updated.
+
+To replace a broken existing package, run the workflow manually with its exact
+version and enable **Rebuild and replace assets for an existing Mojave release**.
+The existing release and tag are retained while its package and checksum assets
+are replaced.
 
 The V8 build is large and can take several hours on the Intel macOS runner.
 
@@ -74,4 +82,3 @@ versions.
 
 This project is independent of OpenAI. Codex itself is licensed by its upstream
 project; this repository only contains automation and compatibility logic.
-

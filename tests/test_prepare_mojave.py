@@ -6,7 +6,14 @@ import unittest
 from pathlib import Path
 
 from scripts.prepare_mojave import (
-    MOJAVE_CONFIG_LINES, PATCH_NAME, RUNTIME_CONFIG, RUNTIME_COPTS, prepare,
+    MOJAVE_CONFIG_LINES,
+    PATCH_NAME,
+    RUNTIME_CONFIG,
+    RUNTIME_COPTS,
+    USER_VERIFICATION_MACOS_DEPENDENCIES,
+    USER_VERIFICATION_MOJAVE_LIB,
+    disable_native_user_verification,
+    prepare,
 )
 
 
@@ -69,6 +76,7 @@ class PrepareMojaveTest(unittest.TestCase):
                     "embedded_v8_version": "15.0.245.2",
                     "bazelrc_changed": True,
                     "runtimes_changed": True,
+                    "user_verification_disabled": False,
                 },
             )
             bazelrc = (root / ".bazelrc").read_text(encoding="utf-8")
@@ -91,10 +99,50 @@ class PrepareMojaveTest(unittest.TestCase):
             again = prepare(root, "0.154.0")
             self.assertFalse(again["bazelrc_changed"])
             self.assertFalse(again["runtimes_changed"])
+            self.assertFalse(again["user_verification_disabled"])
             self.assertEqual(
                 before,
                 {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()},
             )
+
+    def test_disables_macos_10_15_user_verification_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            crate = root / "codex-rs/user-verification"
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(
+                "[package]\nname = \"codex-user-verification\"\n\n"
+                + USER_VERIFICATION_MACOS_DEPENDENCIES,
+                encoding="utf-8",
+            )
+            (crate / "src/lib.rs").write_text(
+                '#[cfg(any(target_os = "macos", test))]\nmod platform_macos;\n'
+                '#[cfg(not(target_os = "macos"))]\nmod unsupported;\n'
+                'pub fn platform_supported() -> bool { cfg!(target_os = "macos") }\n',
+                encoding="utf-8",
+            )
+
+            self.assertTrue(disable_native_user_verification(root))
+            manifest = (crate / "Cargo.toml").read_text(encoding="utf-8")
+            self.assertNotIn("security-framework", manifest)
+            self.assertEqual(
+                (crate / "src/lib.rs").read_text(encoding="utf-8"),
+                USER_VERIFICATION_MOJAVE_LIB,
+            )
+            self.assertFalse(disable_native_user_verification(root))
+
+    def test_rejects_user_verification_source_drift_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            crate = root / "codex-rs/user-verification"
+            (crate / "src").mkdir(parents=True)
+            manifest = "[package]\n" + USER_VERIFICATION_MACOS_DEPENDENCIES
+            (crate / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            (crate / "src/lib.rs").write_text("mod changed_upstream;\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "implementation changed"):
+                disable_native_user_verification(root)
+            self.assertEqual((crate / "Cargo.toml").read_text(encoding="utf-8"), manifest)
 
     def test_rejects_runtime_drift_before_writing_runtime_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -182,4 +230,3 @@ class PrepareMojaveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

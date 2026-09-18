@@ -35,6 +35,80 @@ RUNTIME_COPTS = ''' + select({
         "//conditions:default": [],
     })'''
 
+USER_VERIFICATION_MACOS_DEPENDENCIES = '''[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+dirs = { workspace = true }
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LABiometryType"] }
+security-framework = { version = "3.5", features = ["OSX_10_15"] }
+security-framework-sys = "2.15"
+'''
+
+USER_VERIFICATION_MOJAVE_LIB = '''//! Device credentials and signing, independent of RPC routing, UI, and backend registration.
+
+mod credential;
+mod error;
+mod guard;
+mod key_namespace;
+mod unsupported;
+
+pub use credential::UserVerificationKeyCreation;
+pub use credential::UserVerificationKeyDeletion;
+pub use credential::UserVerificationKeyInfo;
+pub use credential::UserVerificationProof;
+pub use credential::UserVerificationRequest;
+pub use credential::UserVerificationStatus;
+pub use error::UserVerificationCancellationReason;
+pub use error::UserVerificationError;
+pub use error::UserVerificationFailureReason;
+pub use error::UserVerificationUnavailableReason;
+pub use guard::UserVerificationRequestGuard;
+pub use key_namespace::UserVerificationKeyNamespace;
+use std::sync::Arc;
+
+/// Performs local credential operations for one captured account-user identity.
+pub trait UserVerificationProvider: Send + Sync {
+    fn status(
+        &self,
+        guard: &UserVerificationRequestGuard,
+    ) -> Result<UserVerificationStatus, UserVerificationError>;
+
+    fn ensure_key(
+        &self,
+        guard: &UserVerificationRequestGuard,
+    ) -> Result<UserVerificationKeyCreation, UserVerificationError>;
+
+    fn delete(
+        &self,
+        guard: &UserVerificationRequestGuard,
+    ) -> Result<UserVerificationKeyDeletion, UserVerificationError>;
+
+    fn verify(
+        &self,
+        request: &UserVerificationRequest,
+        guard: &UserVerificationRequestGuard,
+    ) -> Result<UserVerificationProof, UserVerificationError>;
+}
+
+/// Mojave does not provide the macOS 10.15+ Data Protection Keychain symbols
+/// required by the native Touch ID provider.
+pub fn platform_supported() -> bool {
+    false
+}
+
+pub fn device_supported() -> bool {
+    false
+}
+
+pub fn platform_provider(
+    namespace: UserVerificationKeyNamespace,
+) -> Arc<dyn UserVerificationProvider> {
+    let _ = namespace.label;
+    Arc::new(unsupported::UnsupportedProvider)
+}
+'''
+
 
 def replace_once(text: str, old: str, new: str, surface: str) -> str:
     if text.count(old) != 1:
@@ -167,6 +241,44 @@ def inject_mojave_config(source_root: Path) -> bool:
     return True
 
 
+def disable_native_user_verification(source_root: Path) -> bool:
+    """Use the portable stub when upstream includes its macOS 10.15+ provider."""
+    crate = source_root / "codex-rs" / "user-verification"
+    if not crate.exists():
+        return False
+
+    manifest_path = crate / "Cargo.toml"
+    lib_path = crate / "src" / "lib.rs"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    lib = lib_path.read_text(encoding="utf-8")
+
+    manifest_changed = USER_VERIFICATION_MACOS_DEPENDENCIES in manifest
+    lib_changed = lib != USER_VERIFICATION_MOJAVE_LIB
+    if not manifest_changed and not lib_changed:
+        return False
+    if not manifest_changed and lib_changed:
+        raise ValueError("upstream user-verification manifest changed")
+
+    # Validate both surfaces before writing either file.
+    required_lib_fragments = (
+        '#[cfg(any(target_os = "macos", test))]\nmod platform_macos;',
+        '#[cfg(not(target_os = "macos"))]\nmod unsupported;',
+        'cfg!(target_os = "macos")',
+    )
+    if lib_changed and any(fragment not in lib for fragment in required_lib_fragments):
+        raise ValueError("upstream user-verification implementation changed")
+
+    if manifest_changed:
+        manifest_path.write_text(
+            manifest.replace(USER_VERIFICATION_MACOS_DEPENDENCIES, "", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    if lib_changed:
+        lib_path.write_text(USER_VERIFICATION_MOJAVE_LIB, encoding="utf-8", newline="\n")
+    return manifest_changed or lib_changed
+
+
 def prepare(source_root: Path, expected_version: str) -> dict:
     actual_version = workspace_version(source_root)
     if actual_version != expected_version:
@@ -177,12 +289,14 @@ def prepare(source_root: Path, expected_version: str) -> dict:
 
     changed = inject_mojave_config(source_root)
     runtimes_changed = prepare_runtimes(source_root)
+    user_verification_disabled = disable_native_user_verification(source_root)
     return {
         "codex_version": actual_version,
         "rusty_v8_version": resolved_v8_crate_version(source_root),
         "embedded_v8_version": embedded_v8_version(source_root),
         "bazelrc_changed": changed,
         "runtimes_changed": runtimes_changed,
+        "user_verification_disabled": user_verification_disabled,
     }
 
 
@@ -199,4 +313,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
